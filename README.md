@@ -58,6 +58,12 @@ bun run index.ts help
 
 Running with no arguments is equivalent to `recent 25`.
 
+## Tests
+
+```bash
+bun test
+```
+
 ## How it works
 
 The script reads `~/Library/Messages/chat.db` in **read-only** mode using Bun's built-in `bun:sqlite` driver. No external dependencies are required.
