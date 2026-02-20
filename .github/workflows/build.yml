@@ -1,0 +1,60 @@
+name: build-binary
+
+on:
+  workflow_dispatch:
+  push:
+    branches: [main]
+    tags: ["v*"]
+
+jobs:
+  build:
+    runs-on: ${{ matrix.runner }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - runner: macos-13
+            artifact: aimc-macos-x64
+          - runner: macos-latest
+            artifact: aimc-macos-arm64
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: oven-sh/setup-bun@v2
+        with:
+          bun-version: latest
+
+      - name: Install deps
+        run: bun install
+
+      - name: Build binary
+        run: bun run build
+
+      - name: Generate checksum
+        run: shasum -a 256 ./aimc > aimc.sha256
+
+      - name: Upload binary
+        uses: actions/upload-artifact@v4
+        with:
+          name: ${{ matrix.artifact }}
+          path: |
+            ./aimc
+            ./aimc.sha256
+
+  release:
+    needs: build
+    runs-on: macos-latest
+    if: startsWith(github.ref, 'refs/tags/')
+    steps:
+      - name: Download artifacts
+        uses: actions/download-artifact@v4
+
+      - name: Create release
+        uses: softprops/action-gh-release@v2
+        with:
+          generate_release_notes: true
+          files: |
+            aimc-macos-x64/aimc
+            aimc-macos-x64/aimc.sha256
+            aimc-macos-arm64/aimc
+            aimc-macos-arm64/aimc.sha256

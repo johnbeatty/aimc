@@ -86,6 +86,14 @@ Running with no arguments is equivalent to `recent 25`.
 bun test
 ```
 
+## Releases
+
+Download the `aimc` binary for your Mac from the GitHub Releases page, then verify it:
+
+```bash
+shasum -a 256 -c aimc.sha256
+```
+
 ## How it works
 
 **Reading:** The script reads `~/Library/Messages/chat.db` in **read-only** mode using Bun's built-in `bun:sqlite` driver. No external dependencies are required.
