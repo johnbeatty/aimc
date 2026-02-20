@@ -291,7 +291,7 @@ describe("getRecentMessages", () => {
     const messages = getRecentMessages(db, 10);
     expect(messages.length).toBe(4);
     // First result is the most recent (highest date)
-    expect(messages[0].text).toBe("Dinner tonight?");
+    expect(messages[0]!.text).toBe("Dinner tonight?");
   });
 
   test("respects the limit parameter", () => {
@@ -318,8 +318,8 @@ describe("getRecentMessages", () => {
     const attachmentMsg = messages.find((m) => m.guid === "guid-3")!;
     expect(attachmentMsg).toBeDefined();
     expect(attachmentMsg.attachments.length).toBe(2);
-    expect(attachmentMsg.attachments[0].mime_type).toBe("image/heic");
-    expect(attachmentMsg.attachments[1].mime_type).toBe("image/jpeg");
+    expect(attachmentMsg.attachments[0]!.mime_type).toBe("image/heic");
+    expect(attachmentMsg.attachments[1]!.mime_type).toBe("image/jpeg");
   });
 
   test("does not duplicate messages with multiple attachments", () => {
@@ -351,7 +351,7 @@ describe("searchMessages", () => {
   test("finds messages matching the search term", () => {
     const results = searchMessages(db, "Hello", 50);
     expect(results.length).toBe(1);
-    expect(results[0].text).toBe("Hello everyone!");
+    expect(results[0]!.text).toBe("Hello everyone!");
   });
 
   test("search is case-insensitive", () => {
@@ -362,7 +362,7 @@ describe("searchMessages", () => {
   test("matches partial words", () => {
     const results = searchMessages(db, "inner", 50);
     expect(results.length).toBe(1);
-    expect(results[0].text).toBe("Dinner tonight?");
+    expect(results[0]!.text).toBe("Dinner tonight?");
   });
 
   test("returns empty array for no matches", () => {
@@ -401,8 +401,8 @@ describe("listChats", () => {
   test("orders chats by last message date descending", () => {
     const chats = listChats(db);
     // SMS chat has the most recent message (Dinner tonight?)
-    expect(chats[0].chat_identifier).toBe("+15559876543");
-    expect(chats[1].display_name).toBe("Family Chat");
+    expect(chats[0]!.chat_identifier).toBe("+15559876543");
+    expect(chats[1]!.display_name).toBe("Family Chat");
   });
 
   test("counts messages per chat correctly", () => {
