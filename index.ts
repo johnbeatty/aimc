@@ -8,6 +8,7 @@ import {
   getRecentMessages,
   searchMessages,
   listChats,
+  sendMessage,
 } from "./lib";
 
 const DB_PATH = join(homedir(), "Library", "Messages", "chat.db");
@@ -69,12 +70,74 @@ function cmdChats(db: Database) {
   }
 }
 
+async function cmdSend(args: string[]) {
+  // Parse flags: --to <recipient> --text <message> [--file <path>] [--service imessage|sms] [--chat]
+  let recipient = "";
+  let text = "";
+  let file = "";
+  let service: "imessage" | "sms" = "imessage";
+  let isChat = false;
+
+  for (let i = 0; i < args.length; i++) {
+    switch (args[i]) {
+      case "--to":
+        recipient = args[++i] ?? "";
+        break;
+      case "--text":
+        text = args[++i] ?? "";
+        break;
+      case "--file":
+        file = args[++i] ?? "";
+        break;
+      case "--service":
+        service = (args[++i] ?? "imessage") as "imessage" | "sms";
+        break;
+      case "--chat":
+        isChat = true;
+        break;
+    }
+  }
+
+  if (!recipient) {
+    console.error("Error: --to <recipient> is required.\n");
+    printUsage();
+    process.exit(1);
+  }
+  if (!text && !file) {
+    console.error("Error: at least one of --text or --file is required.\n");
+    printUsage();
+    process.exit(1);
+  }
+
+  try {
+    await sendMessage({
+      recipient,
+      text: text || undefined,
+      attachmentPath: file || undefined,
+      service,
+      isChat,
+    });
+    console.log(`Message sent to ${recipient}.`);
+  } catch (err) {
+    console.error(`Failed to send message: ${(err as Error).message}`);
+    process.exit(1);
+  }
+}
+
 function printUsage() {
   console.log(`Usage:
-  bun run index.ts recent [limit]     Show recent messages (default: 25)
-  bun run index.ts search <term> [limit]  Search messages by keyword (default limit: 50)
-  bun run index.ts chats              List all chats with message counts
-  bun run index.ts                    Same as 'recent 25'
+  bun run index.ts recent [limit]           Show recent messages (default: 25)
+  bun run index.ts search <term> [limit]    Search messages by keyword (default limit: 50)
+  bun run index.ts chats                    List all chats with message counts
+  bun run index.ts send --to <recipient> --text <message> [--file <path>] [--service imessage|sms] [--chat]
+  bun run index.ts                          Same as 'recent 25'
+
+Send options:
+  --to <recipient>       Phone number, email, or chat ID
+  --text <message>       Message text to send
+  --file <path>          Path to a file to attach
+  --service <service>    "imessage" (default) or "sms"
+  --chat                 Treat recipient as a chat ID (for group chats)
 `);
 }
 
@@ -104,6 +167,10 @@ switch (command) {
   }
   case "chats": {
     cmdChats(db);
+    break;
+  }
+  case "send": {
+    await cmdSend(args);
     break;
   }
   case "help":

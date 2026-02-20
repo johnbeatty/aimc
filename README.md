@@ -1,12 +1,13 @@
 # imessage_client
 
-A simple Bun script to read the local macOS iMessage database (`chat.db`).
+A simple Bun CLI to read and send iMessages on macOS.
 
 ## Prerequisites
 
 - [Bun](https://bun.sh) v1.0+
 - macOS (the iMessage database is a macOS-only file)
-- **Full Disk Access** granted to your terminal app (System Settings > Privacy & Security > Full Disk Access)
+- **Full Disk Access** granted to your terminal app (System Settings > Privacy & Security > Full Disk Access) — required for reading messages
+- **Automation permission** for Messages.app — macOS will prompt on first send
 
 ## Setup
 
@@ -48,6 +49,27 @@ List all conversations with service type, message count, and last activity date.
 bun run index.ts chats
 ```
 
+#### `send --to <recipient> --text <message> [options]`
+
+Send an iMessage or SMS via the Messages app.
+
+```bash
+bun run index.ts send --to "+15551234567" --text "Hello!"
+bun run index.ts send --to "+15551234567" --text "Check this out" --file ~/photo.jpg
+bun run index.ts send --to "+15551234567" --text "Hey" --service sms
+bun run index.ts send --to "iMessage;+;chat123456" --text "Hey group!" --chat
+```
+
+| Option | Description |
+|---|---|
+| `--to <recipient>` | Phone number, email, or chat ID (required) |
+| `--text <message>` | Message text (required unless `--file` is provided) |
+| `--file <path>` | Path to a file to attach |
+| `--service <svc>` | `imessage` (default) or `sms` |
+| `--chat` | Treat `--to` as a chat ID (for group chats) |
+
+Sending works by executing AppleScript against the Messages app — no private APIs are used.
+
 #### `help`
 
 Print usage info.
@@ -66,7 +88,9 @@ bun test
 
 ## How it works
 
-The script reads `~/Library/Messages/chat.db` in **read-only** mode using Bun's built-in `bun:sqlite` driver. No external dependencies are required.
+**Reading:** The script reads `~/Library/Messages/chat.db` in **read-only** mode using Bun's built-in `bun:sqlite` driver. No external dependencies are required.
+
+**Sending:** Messages are sent via AppleScript using the Messages.app Scripting Dictionary (`tell application "Messages" to send ...`). Attachments are staged into `~/Library/Messages/Attachments/imsg/` before sending so Messages.app can access them.
 
 It joins across the core iMessage tables:
 

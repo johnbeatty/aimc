@@ -6,8 +6,13 @@ import {
   getRecentMessages,
   searchMessages,
   listChats,
+  stageAttachment,
+  buildSendAppleScript,
   type MessageRow,
 } from "./lib";
+import { existsSync, writeFileSync, unlinkSync, rmSync } from "fs";
+import { join } from "path";
+import { tmpdir } from "os";
 
 // ─── Test Database Setup ─────────────────────────────────────────────
 
@@ -419,5 +424,94 @@ describe("listChats", () => {
     const chats = listChats(emptyDb);
     expect(chats.length).toBe(0);
     emptyDb.close();
+  });
+});
+
+// ─── Send Tests ──────────────────────────────────────────────────────
+
+describe("buildSendAppleScript", () => {
+  test("builds script for direct iMessage text", () => {
+    const script = buildSendAppleScript({
+      recipient: "+15551234567",
+      text: "Hello!",
+      service: "imessage",
+      attachmentPath: "",
+      useAttachment: false,
+      chatId: "",
+      useChat: false,
+    });
+    expect(script).toContain("on run argv");
+    expect(script).toContain("tell application \"Messages\"");
+    expect(script).toContain("service type is iMessage");
+    expect(script).toContain("send theMessage to targetBuddy");
+  });
+
+  test("builds script for SMS service", () => {
+    const script = buildSendAppleScript({
+      recipient: "+15551234567",
+      text: "Hello!",
+      service: "sms",
+      attachmentPath: "",
+      useAttachment: false,
+      chatId: "",
+      useChat: false,
+    });
+    expect(script).toContain("service type is SMS");
+  });
+
+  test("builds script for chat mode (group chat)", () => {
+    const script = buildSendAppleScript({
+      recipient: "",
+      text: "Hey group!",
+      service: "imessage",
+      attachmentPath: "",
+      useAttachment: false,
+      chatId: "iMessage;+;chat123456",
+      useChat: true,
+    });
+    expect(script).toContain("chat id chatId");
+    expect(script).toContain("send theMessage to targetChat");
+  });
+
+  test("builds script with attachment", () => {
+    const script = buildSendAppleScript({
+      recipient: "+15551234567",
+      text: "",
+      service: "imessage",
+      attachmentPath: "/tmp/photo.jpg",
+      useAttachment: true,
+      chatId: "",
+      useChat: false,
+    });
+    expect(script).toContain("POSIX file theFilePath as alias");
+    expect(script).toContain("send theFile to targetBuddy");
+  });
+});
+
+describe("stageAttachment", () => {
+  let tempFile: string;
+
+  beforeEach(() => {
+    tempFile = join(tmpdir(), `imsg-test-${Date.now()}.txt`);
+    writeFileSync(tempFile, "test attachment content");
+  });
+
+  afterEach(() => {
+    if (existsSync(tempFile)) unlinkSync(tempFile);
+  });
+
+  test("copies file to staging directory", () => {
+    const staged = stageAttachment(tempFile);
+    expect(existsSync(staged)).toBe(true);
+    expect(staged).toContain("Library/Messages/Attachments/imsg/");
+    expect(staged).toEndWith(`.txt`);
+    // Clean up staged file
+    rmSync(join(staged, ".."), { recursive: true });
+  });
+
+  test("throws when source file does not exist", () => {
+    expect(() => stageAttachment("/nonexistent/file.txt")).toThrow(
+      "Attachment not found"
+    );
   });
 });

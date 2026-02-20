@@ -1,4 +1,8 @@
 import { Database } from "bun:sqlite";
+import { homedir } from "os";
+import { join, basename } from "path";
+import { existsSync, mkdirSync, copyFileSync } from "fs";
+import { randomUUID } from "crypto";
 
 // ─── Types ───────────────────────────────────────────────────────────
 
@@ -177,4 +181,150 @@ export function listChats(db: Database): ChatRow[] {
     ORDER BY last_message_date DESC
   `);
   return query.all();
+}
+
+// ─── Send ────────────────────────────────────────────────────────────
+
+export interface SendOptions {
+  /** Phone number, email, or chat ID to send to. */
+  recipient: string;
+  /** Message text. At least one of text or attachmentPath is required. */
+  text?: string;
+  /** Path to a file to attach. */
+  attachmentPath?: string;
+  /** "imessage" or "sms". Defaults to "imessage". */
+  service?: "imessage" | "sms";
+  /** If true, treat recipient as a chat ID instead of a buddy. */
+  isChat?: boolean;
+}
+
+/**
+ * Stage an attachment into ~/Library/Messages/Attachments/imsg/<uuid>/
+ * so Messages.app can access it. Returns the staged file path.
+ */
+export function stageAttachment(sourcePath: string): string {
+  const expandedPath = sourcePath.replace(/^~/, homedir());
+  if (!existsSync(expandedPath)) {
+    throw new Error(`Attachment not found: ${expandedPath}`);
+  }
+
+  const stagingDir = join(
+    homedir(),
+    "Library",
+    "Messages",
+    "Attachments",
+    "imsg",
+    randomUUID()
+  );
+  mkdirSync(stagingDir, { recursive: true });
+
+  const destPath = join(stagingDir, basename(expandedPath));
+  copyFileSync(expandedPath, destPath);
+  return destPath;
+}
+
+/**
+ * Build the AppleScript source for sending a message via Messages.app.
+ */
+export function buildSendAppleScript(options: {
+  recipient: string;
+  text: string;
+  service: string;
+  attachmentPath: string;
+  useAttachment: boolean;
+  chatId: string;
+  useChat: boolean;
+}): string {
+  // All values are passed as arguments to the "on run" handler for safety.
+  return `on run argv
+  set theRecipient to item 1 of argv
+  set theMessage to item 2 of argv
+  set theService to item 3 of argv
+  set theFilePath to item 4 of argv
+  set useAttachment to item 5 of argv
+  set chatId to item 6 of argv
+  set useChat to item 7 of argv
+
+  tell application "Messages"
+    if useChat is "1" then
+      set targetChat to chat id chatId
+      if theMessage is not "" then
+        send theMessage to targetChat
+      end if
+      if useAttachment is "1" then
+        set theFile to POSIX file theFilePath as alias
+        send theFile to targetChat
+      end if
+    else
+      if theService is "sms" then
+        set targetService to first service whose service type is SMS
+      else
+        set targetService to first service whose service type is iMessage
+      end if
+      set targetBuddy to buddy theRecipient of targetService
+      if theMessage is not "" then
+        send theMessage to targetBuddy
+      end if
+      if useAttachment is "1" then
+        set theFile to POSIX file theFilePath as alias
+        send theFile to targetBuddy
+      end if
+    end if
+  end tell
+end run`;
+}
+
+/**
+ * Send an iMessage/SMS using Messages.app via AppleScript.
+ */
+export async function sendMessage(options: SendOptions): Promise<void> {
+  const { recipient, text, attachmentPath, service = "imessage", isChat = false } = options;
+
+  if (!text && !attachmentPath) {
+    throw new Error("At least one of text or attachmentPath is required.");
+  }
+
+  // Stage attachment if provided
+  let stagedPath = "";
+  if (attachmentPath) {
+    stagedPath = stageAttachment(attachmentPath);
+  }
+
+  const useAttachment = stagedPath !== "";
+  const scriptSource = buildSendAppleScript({
+    recipient,
+    text: text ?? "",
+    service,
+    attachmentPath: stagedPath,
+    useAttachment,
+    chatId: isChat ? recipient : "",
+    useChat: isChat,
+  });
+
+  const args = [
+    recipient,
+    text ?? "",
+    service,
+    stagedPath,
+    useAttachment ? "1" : "0",
+    isChat ? recipient : "",
+    isChat ? "1" : "0",
+  ];
+
+  // Execute via osascript
+  const proc = Bun.spawn(
+    ["/usr/bin/osascript", "-", ...args],
+    {
+      stdin: new TextEncoder().encode(scriptSource),
+      stdout: "pipe",
+      stderr: "pipe",
+    }
+  );
+
+  const exitCode = await proc.exited;
+
+  if (exitCode !== 0) {
+    const stderr = await new Response(proc.stderr).text();
+    throw new Error(`AppleScript failed (exit ${exitCode}): ${stderr.trim()}`);
+  }
 }
