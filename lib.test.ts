@@ -2,13 +2,21 @@ import { describe, test, expect, beforeEach, afterEach } from "bun:test";
 import { Database } from "bun:sqlite";
 import {
   appleTimestampToDate,
+  dateToAppleTimestamp,
   formatMessage,
+  formatAttachmentLine,
+  formatChatRow,
   getRecentMessages,
   searchMessages,
   listChats,
+  getChatMessages,
+  pollNewMessages,
+  getMaxRowid,
   stageAttachment,
   buildSendAppleScript,
   type MessageRow,
+  type AttachmentInfo,
+  type ChatRow,
 } from "./lib";
 import { existsSync, writeFileSync, unlinkSync, rmSync } from "fs";
 import { join } from "path";
@@ -64,11 +72,7 @@ function createTestDatabase(): Database {
   return db;
 }
 
-/** Convert a JS Date to an Apple nanosecond timestamp (since 2001-01-01). */
-function dateToAppleTimestamp(date: Date): number {
-  const APPLE_EPOCH_OFFSET = 978307200;
-  return (date.getTime() / 1000 - APPLE_EPOCH_OFFSET) * 1e9;
-}
+// dateToAppleTimestamp is now imported from ./lib
 
 function seedBasicData(db: Database) {
   // Handles
@@ -224,7 +228,12 @@ describe("formatMessage", () => {
       display_name: "Chat",
       chat_identifier: "chat1",
       handle: "+1555",
-      attachments: [{ filename: "/path/to/IMG_001.heic", mime_type: "image/heic" }],
+      attachments: [{
+        filename: "/path/to/IMG_001.heic",
+        mime_type: "image/heic",
+        resolved_path: "/path/to/IMG_001.heic",
+        missing: true,
+      }],
     };
     const result = formatMessage(msg);
     expect(result).toContain("[attachment: IMG_001.heic (image/heic)]");
@@ -244,8 +253,18 @@ describe("formatMessage", () => {
       chat_identifier: "chat1",
       handle: "+1555",
       attachments: [
-        { filename: "/path/to/IMG_001.heic", mime_type: "image/heic" },
-        { filename: "/path/to/IMG_002.jpg", mime_type: "image/jpeg" },
+        {
+          filename: "/path/to/IMG_001.heic",
+          mime_type: "image/heic",
+          resolved_path: "/path/to/IMG_001.heic",
+          missing: true,
+        },
+        {
+          filename: "/path/to/IMG_002.jpg",
+          mime_type: "image/jpeg",
+          resolved_path: "/path/to/IMG_002.jpg",
+          missing: true,
+        },
       ],
     };
     const result = formatMessage(msg);
@@ -313,12 +332,14 @@ describe("getRecentMessages", () => {
     expect(hello.display_name).toBe("Family Chat");
   });
 
-  test("loads attachments for messages", () => {
+  test("loads attachments for messages with resolved paths", () => {
     const messages = getRecentMessages(db, 10);
     const attachmentMsg = messages.find((m) => m.guid === "guid-3")!;
     expect(attachmentMsg).toBeDefined();
     expect(attachmentMsg.attachments.length).toBe(2);
     expect(attachmentMsg.attachments[0]!.mime_type).toBe("image/heic");
+    expect(attachmentMsg.attachments[0]!.resolved_path).toContain("Library/Messages/Attachments/IMG_001.heic");
+    expect(attachmentMsg.attachments[0]!.missing).toBe(true);
     expect(attachmentMsg.attachments[1]!.mime_type).toBe("image/jpeg");
   });
 
@@ -513,5 +534,249 @@ describe("stageAttachment", () => {
     expect(() => stageAttachment("/nonexistent/file.txt")).toThrow(
       "Attachment not found"
     );
+  });
+});
+
+// ─── New Tests ───────────────────────────────────────────────────────
+
+describe("dateToAppleTimestamp", () => {
+  test("round-trips with appleTimestampToDate", () => {
+    const original = new Date("2025-06-15T08:30:00Z");
+    const apple = dateToAppleTimestamp(original);
+    const roundTripped = appleTimestampToDate(apple);
+    expect(roundTripped.toISOString()).toBe(original.toISOString());
+  });
+
+  test("returns nanosecond-scale value", () => {
+    const apple = dateToAppleTimestamp(new Date("2025-01-01T00:00:00Z"));
+    expect(apple).toBeGreaterThan(1e15);
+  });
+});
+
+describe("formatAttachmentLine", () => {
+  test("formats an existing attachment", () => {
+    const att: AttachmentInfo = {
+      filename: "~/Library/Messages/Attachments/photo.jpg",
+      mime_type: "image/jpeg",
+      resolved_path: "/Users/test/Library/Messages/Attachments/photo.jpg",
+      missing: false,
+    };
+    const line = formatAttachmentLine(att);
+    expect(line).toContain("photo.jpg");
+    expect(line).toContain("image/jpeg");
+    expect(line).not.toContain("[missing]");
+    expect(line).toContain("/Users/test/Library/Messages/Attachments/photo.jpg");
+  });
+
+  test("flags missing files", () => {
+    const att: AttachmentInfo = {
+      filename: "~/gone.png",
+      mime_type: "image/png",
+      resolved_path: "/Users/test/gone.png",
+      missing: true,
+    };
+    const line = formatAttachmentLine(att);
+    expect(line).toContain("[missing]");
+  });
+
+  test("shows unknown for null mime type", () => {
+    const att: AttachmentInfo = {
+      filename: "~/file.dat",
+      mime_type: null,
+      resolved_path: "/Users/test/file.dat",
+      missing: true,
+    };
+    const line = formatAttachmentLine(att);
+    expect(line).toContain("unknown");
+  });
+});
+
+describe("formatChatRow", () => {
+  test("formats a chat with display name", () => {
+    const chat: ChatRow = {
+      chat_id: 42,
+      display_name: "Family Chat",
+      chat_identifier: "chat123",
+      service_name: "iMessage",
+      message_count: 150,
+      last_message_date: dateToAppleTimestamp(new Date("2025-06-01T12:00:00Z")),
+    };
+    const line = formatChatRow(chat);
+    expect(line).toContain("[42]");
+    expect(line).toContain("Family Chat");
+    expect(line).toContain("iMessage");
+    expect(line).toContain("150 messages");
+  });
+
+  test("falls back to chat_identifier when display_name is null", () => {
+    const chat: ChatRow = {
+      chat_id: 7,
+      display_name: null,
+      chat_identifier: "+15551234567",
+      service_name: "SMS",
+      message_count: 5,
+      last_message_date: 0,
+    };
+    const line = formatChatRow(chat);
+    expect(line).toContain("+15551234567");
+  });
+});
+
+describe("listChats with limit", () => {
+  let db: Database;
+
+  beforeEach(() => {
+    db = createTestDatabase();
+    seedBasicData(db);
+  });
+
+  afterEach(() => {
+    db.close();
+  });
+
+  test("returns all chats when no limit", () => {
+    const chats = listChats(db);
+    expect(chats.length).toBe(2);
+  });
+
+  test("respects limit parameter", () => {
+    const chats = listChats(db, 1);
+    expect(chats.length).toBe(1);
+  });
+});
+
+describe("getChatMessages", () => {
+  let db: Database;
+
+  beforeEach(() => {
+    db = createTestDatabase();
+    seedBasicData(db);
+  });
+
+  afterEach(() => {
+    db.close();
+  });
+
+  test("returns messages for a specific chat", () => {
+    const messages = getChatMessages(db, { chatId: 1 });
+    expect(messages.length).toBe(2);
+    // All messages should belong to chat 1
+    for (const msg of messages) {
+      expect(msg.display_name).toBe("Family Chat");
+    }
+  });
+
+  test("respects limit", () => {
+    const messages = getChatMessages(db, { chatId: 1, limit: 1 });
+    expect(messages.length).toBe(1);
+  });
+
+  test("filters by participant handle", () => {
+    const messages = getChatMessages(db, {
+      chatId: 1,
+      participants: ["+15551234567"],
+    });
+    expect(messages.length).toBe(1);
+    expect(messages[0]!.handle).toBe("+15551234567");
+  });
+
+  test("filters by start date", () => {
+    // t2 is 2025-01-15T10:05:00Z -- set start after t1 but before t2
+    const messages = getChatMessages(db, {
+      chatId: 1,
+      start: new Date("2025-01-15T10:03:00Z"),
+    });
+    expect(messages.length).toBe(1);
+    expect(messages[0]!.text).toBe("Hey there");
+  });
+
+  test("filters by end date", () => {
+    // Only include messages before t2
+    const messages = getChatMessages(db, {
+      chatId: 1,
+      end: new Date("2025-01-15T10:03:00Z"),
+    });
+    expect(messages.length).toBe(1);
+    expect(messages[0]!.text).toBe("Hello everyone!");
+  });
+
+  test("filters by start and end date range", () => {
+    // Chat 2 has messages at t3 (10:10) and t4 (11:00)
+    const messages = getChatMessages(db, {
+      chatId: 2,
+      start: new Date("2025-01-15T10:00:00Z"),
+      end: new Date("2025-01-15T10:30:00Z"),
+    });
+    expect(messages.length).toBe(1);
+    // Only t3 is within the range
+    expect(messages[0]!.guid).toBe("guid-3");
+  });
+
+  test("returns empty array for chat with no messages", () => {
+    // Chat 99 doesn't exist
+    const messages = getChatMessages(db, { chatId: 99 });
+    expect(messages.length).toBe(0);
+  });
+
+  test("loads attachments for chat messages", () => {
+    const messages = getChatMessages(db, { chatId: 2 });
+    const attachmentMsg = messages.find((m) => m.guid === "guid-3");
+    expect(attachmentMsg).toBeDefined();
+    expect(attachmentMsg!.attachments.length).toBe(2);
+  });
+});
+
+describe("pollNewMessages", () => {
+  let db: Database;
+
+  beforeEach(() => {
+    db = createTestDatabase();
+    seedBasicData(db);
+  });
+
+  afterEach(() => {
+    db.close();
+  });
+
+  test("returns messages with rowid greater than sinceRowid", () => {
+    const messages = pollNewMessages(db, 2);
+    expect(messages.length).toBe(2);
+    expect(messages[0]!.rowid).toBe(3);
+    expect(messages[1]!.rowid).toBe(4);
+  });
+
+  test("filters by chat id", () => {
+    const messages = pollNewMessages(db, 0, { chatId: 1 });
+    expect(messages.length).toBe(2);
+    for (const msg of messages) {
+      expect(msg.display_name).toBe("Family Chat");
+    }
+  });
+
+  test("returns empty array when no new messages", () => {
+    const messages = pollNewMessages(db, 100);
+    expect(messages.length).toBe(0);
+  });
+
+  test("returns messages in ascending rowid order", () => {
+    const messages = pollNewMessages(db, 0);
+    for (let i = 1; i < messages.length; i++) {
+      expect(messages[i]!.rowid).toBeGreaterThanOrEqual(messages[i - 1]!.rowid);
+    }
+  });
+});
+
+describe("getMaxRowid", () => {
+  test("returns highest message rowid", () => {
+    const db = createTestDatabase();
+    seedBasicData(db);
+    expect(getMaxRowid(db)).toBe(4);
+    db.close();
+  });
+
+  test("returns 0 for empty database", () => {
+    const db = createTestDatabase();
+    expect(getMaxRowid(db)).toBe(0);
+    db.close();
   });
 });

@@ -31,17 +31,56 @@ export interface ChatRow {
 }
 
 export interface AttachmentInfo {
+  /** Raw filename from the database (may contain ~/). */
   filename: string;
   mime_type: string | null;
+  /** Tilde-expanded absolute path. */
+  resolved_path: string;
+  /** True when the resolved file does not exist on disk. */
+  missing: boolean;
+}
+
+export interface HistoryOptions {
+  /** chat rowid to fetch messages for. */
+  chatId: number;
+  /** Maximum number of messages to return. */
+  limit?: number;
+  /** Filter to messages involving these handles (phone/email). */
+  participants?: string[];
+  /** Only messages on or after this date. */
+  start?: Date;
+  /** Only messages before this date. */
+  end?: Date;
+}
+
+export interface WatchOptions {
+  /** chat rowid; if omitted, watch all chats. */
+  chatId?: number;
+  /** Only return messages with rowid greater than this. */
+  sinceRowid?: number;
+  /** Polling interval in milliseconds. */
+  debounce?: number;
+  /** Filter to messages involving these handles (phone/email). */
+  participants?: string[];
+  /** Only messages on or after this date. */
+  start?: Date;
+  /** Only messages before this date. */
+  end?: Date;
 }
 
 // ─── Helpers ─────────────────────────────────────────────────────────
 
+const APPLE_EPOCH_OFFSET = 978307200;
+
 /** Apple stores dates as nanoseconds since 2001-01-01. Convert to JS Date. */
 export function appleTimestampToDate(timestamp: number): Date {
-  const APPLE_EPOCH_OFFSET = 978307200;
   const seconds = timestamp > 1e15 ? timestamp / 1e9 : timestamp;
   return new Date((seconds + APPLE_EPOCH_OFFSET) * 1000);
+}
+
+/** Convert a JS Date to an Apple nanosecond timestamp (since 2001-01-01). */
+export function dateToAppleTimestamp(date: Date): number {
+  return (date.getTime() / 1000 - APPLE_EPOCH_OFFSET) * 1e9;
 }
 
 export function formatMessage(msg: MessageRow): string {
@@ -69,6 +108,23 @@ export function formatMessage(msg: MessageRow): string {
   }
 
   return `[${date.toLocaleString()}] ${direction} ${chat} (${sender}): ${body}`;
+}
+
+/** Format a single attachment as a metadata line for --attachments output. */
+export function formatAttachmentLine(att: AttachmentInfo): string {
+  const name = basename(att.resolved_path);
+  const mime = att.mime_type ?? "unknown";
+  const flag = att.missing ? " [missing]" : "";
+  return `  📎 ${name}  (${mime})${flag}  ${att.resolved_path}`;
+}
+
+/** Format a ChatRow as a human-readable line. */
+export function formatChatRow(chat: ChatRow): string {
+  const name = chat.display_name || chat.chat_identifier;
+  const lastDate = chat.last_message_date
+    ? appleTimestampToDate(chat.last_message_date).toLocaleString()
+    : "never";
+  return `  [${chat.chat_id}] ${name}  [${chat.service_name}]  ${chat.message_count} messages  (last: ${lastDate})`;
 }
 
 // ─── Queries ─────────────────────────────────────────────────────────
@@ -125,8 +181,14 @@ function loadAttachments(
     if (!row.filename) {
       continue;
     }
+    const resolvedPath = row.filename.replace(/^~/, homedir());
     const attachments = attachmentsByMessage.get(row.message_id) ?? [];
-    attachments.push({ filename: row.filename, mime_type: row.mime_type });
+    attachments.push({
+      filename: row.filename,
+      mime_type: row.mime_type,
+      resolved_path: resolvedPath,
+      missing: !existsSync(resolvedPath),
+    });
     attachmentsByMessage.set(row.message_id, attachments);
   }
 
@@ -165,8 +227,8 @@ export function searchMessages(db: Database, term: string, limit: number): Messa
   return attachAttachments(db, messages);
 }
 
-export function listChats(db: Database): ChatRow[] {
-  const query = db.query<ChatRow, []>(`
+export function listChats(db: Database, limit?: number): ChatRow[] {
+  const sql = `
     SELECT
       c.rowid AS chat_id,
       c.display_name,
@@ -179,8 +241,136 @@ export function listChats(db: Database): ChatRow[] {
     LEFT JOIN message m ON m.rowid = cmj.message_id
     GROUP BY c.rowid
     ORDER BY last_message_date DESC
-  `);
-  return query.all();
+    ${limit !== undefined ? "LIMIT ?" : ""}
+  `;
+  if (limit !== undefined) {
+    return db.query<ChatRow, [number]>(sql).all(limit);
+  }
+  return db.query<ChatRow, []>(sql).all();
+}
+
+/** Fetch messages for a specific chat, with optional filters. */
+export function getChatMessages(db: Database, options: HistoryOptions): MessageRow[] {
+  const { chatId, limit = 50, participants, start, end } = options;
+
+  const conditions: string[] = ["cmj.chat_id = ?"];
+  const params: (number | string)[] = [chatId];
+
+  if (participants && participants.length > 0) {
+    const placeholders = participants.map(() => "?").join(", ");
+    conditions.push(`h.id IN (${placeholders})`);
+    params.push(...participants);
+  }
+
+  if (start) {
+    conditions.push("m.date >= ?");
+    params.push(dateToAppleTimestamp(start));
+  }
+
+  if (end) {
+    conditions.push("m.date < ?");
+    params.push(dateToAppleTimestamp(end));
+  }
+
+  const where = conditions.join(" AND ");
+
+  const sql = `
+    SELECT
+      m.rowid,
+      m.guid,
+      m.text,
+      m.handle_id,
+      m.service,
+      m.date,
+      m.is_from_me,
+      m.cache_roomnames,
+      c.display_name,
+      c.chat_identifier,
+      h.id AS handle
+    FROM message m
+    LEFT JOIN chat_message_join cmj ON cmj.message_id = m.rowid
+    LEFT JOIN chat c ON c.rowid = cmj.chat_id
+    LEFT JOIN handle h ON h.rowid = m.handle_id
+    WHERE ${where}
+    ORDER BY m.date DESC
+    LIMIT ?
+  `;
+
+  params.push(limit);
+  const query = db.query<MessageRow, (number | string)[]>(sql);
+  const messages = query.all(...params);
+  return attachAttachments(db, messages);
+}
+
+/** Poll for new messages with rowid > sinceRowid. Returns the new messages. */
+export function pollNewMessages(
+  db: Database,
+  sinceRowid: number,
+  options?: {
+    chatId?: number;
+    participants?: string[];
+    start?: Date;
+    end?: Date;
+  }
+): MessageRow[] {
+  const conditions: string[] = ["m.rowid > ?"];
+  const params: (number | string)[] = [sinceRowid];
+
+  if (options?.chatId !== undefined) {
+    conditions.push("cmj.chat_id = ?");
+    params.push(options.chatId);
+  }
+
+  if (options?.participants && options.participants.length > 0) {
+    const placeholders = options.participants.map(() => "?").join(", ");
+    conditions.push(`h.id IN (${placeholders})`);
+    params.push(...options.participants);
+  }
+
+  if (options?.start) {
+    conditions.push("m.date >= ?");
+    params.push(dateToAppleTimestamp(options.start));
+  }
+
+  if (options?.end) {
+    conditions.push("m.date < ?");
+    params.push(dateToAppleTimestamp(options.end));
+  }
+
+  const where = conditions.join(" AND ");
+
+  const sql = `
+    SELECT
+      m.rowid,
+      m.guid,
+      m.text,
+      m.handle_id,
+      m.service,
+      m.date,
+      m.is_from_me,
+      m.cache_roomnames,
+      c.display_name,
+      c.chat_identifier,
+      h.id AS handle
+    FROM message m
+    LEFT JOIN chat_message_join cmj ON cmj.message_id = m.rowid
+    LEFT JOIN chat c ON c.rowid = cmj.chat_id
+    LEFT JOIN handle h ON h.rowid = m.handle_id
+    WHERE ${where}
+    ORDER BY m.rowid ASC
+  `;
+
+  const query = db.query<MessageRow, (number | string)[]>(sql);
+  const messages = query.all(...params);
+  return attachAttachments(db, messages);
+}
+
+/** Get the maximum message rowid in the database. */
+export function getMaxRowid(db: Database): number {
+  const row = db.query<{ max_rowid: number | null }, []>(
+    "SELECT MAX(rowid) AS max_rowid FROM message"
+  ).get();
+  return row?.max_rowid ?? 0;
 }
 
 // ─── Send ────────────────────────────────────────────────────────────
@@ -192,10 +382,12 @@ export interface SendOptions {
   text?: string;
   /** Path to a file to attach. */
   attachmentPath?: string;
-  /** "imessage" or "sms". Defaults to "imessage". */
-  service?: "imessage" | "sms";
+  /** "imessage", "sms", or "auto". Defaults to "imessage". */
+  service?: "imessage" | "sms" | "auto";
   /** If true, treat recipient as a chat ID instead of a buddy. */
   isChat?: boolean;
+  /** Region hint for phone number formatting (e.g. "US"). Currently informational. */
+  region?: string;
 }
 
 /**
@@ -278,7 +470,10 @@ end run`;
  * Send an iMessage/SMS using Messages.app via AppleScript.
  */
 export async function sendMessage(options: SendOptions): Promise<void> {
-  const { recipient, text, attachmentPath, service = "imessage", isChat = false } = options;
+  const { recipient, text, attachmentPath, service: rawService = "imessage", isChat = false } = options;
+
+  // "auto" resolves to "imessage" -- AppleScript will fall back to SMS if needed
+  const service = rawService === "auto" ? "imessage" : rawService;
 
   if (!text && !attachmentPath) {
     throw new Error("At least one of text or attachmentPath is required.");

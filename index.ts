@@ -3,11 +3,16 @@ import { homedir } from "os";
 import { join } from "path";
 import {
   type MessageRow,
+  type ChatRow,
+  type AttachmentInfo,
   appleTimestampToDate,
   formatMessage,
-  getRecentMessages,
-  searchMessages,
+  formatAttachmentLine,
+  formatChatRow,
   listChats,
+  getChatMessages,
+  pollNewMessages,
+  getMaxRowid,
   sendMessage,
 } from "./lib";
 
@@ -27,79 +32,244 @@ function openDatabase(): Database {
   }
 }
 
+// ─── Flag Parsing ────────────────────────────────────────────────────
+
+/** Parse --key value and --flag style arguments from an argv slice. */
+function parseFlags(args: string[]): Map<string, string> {
+  const flags = new Map<string, string>();
+  for (let i = 0; i < args.length; i++) {
+    const arg = args[i]!;
+    if (!arg.startsWith("--")) {
+      continue;
+    }
+    const key = arg;
+    const next = args[i + 1];
+    if (next !== undefined && !next.startsWith("--")) {
+      flags.set(key, next);
+      i++;
+    } else {
+      // Boolean flag (no value)
+      flags.set(key, "");
+    }
+  }
+  return flags;
+}
+
+/** Parse a flag value as an integer with a default fallback. */
+function flagInt(flags: Map<string, string>, key: string, fallback: number): number {
+  const raw = flags.get(key);
+  if (raw === undefined) {
+    return fallback;
+  }
+  const parsed = parseInt(raw, 10);
+  return Number.isNaN(parsed) ? fallback : parsed;
+}
+
+/** Parse an ISO 8601 date string from a flag, or return undefined. */
+function flagDate(flags: Map<string, string>, key: string): Date | undefined {
+  const raw = flags.get(key);
+  if (raw === undefined) {
+    return undefined;
+  }
+  const date = new Date(raw);
+  if (Number.isNaN(date.getTime())) {
+    console.error(`Error: invalid date for ${key}: ${raw}`);
+    process.exit(1);
+  }
+  return date;
+}
+
+/** Parse a comma-separated list of participants from a flag. */
+function flagList(flags: Map<string, string>, key: string): string[] | undefined {
+  const raw = flags.get(key);
+  if (raw === undefined) {
+    return undefined;
+  }
+  return raw.split(",").map((s) => s.trim()).filter((s) => s.length > 0);
+}
+
+/** Parse a debounce value like "250ms" or "1s" into milliseconds. */
+function flagDebounce(flags: Map<string, string>, key: string, fallback: number): number {
+  const raw = flags.get(key);
+  if (raw === undefined) {
+    return fallback;
+  }
+  if (raw.endsWith("ms")) {
+    const n = parseInt(raw.slice(0, -2), 10);
+    return Number.isNaN(n) ? fallback : n;
+  }
+  if (raw.endsWith("s")) {
+    const n = parseFloat(raw.slice(0, -1));
+    return Number.isNaN(n) ? fallback : n * 1000;
+  }
+  const n = parseInt(raw, 10);
+  return Number.isNaN(n) ? fallback : n;
+}
+
+// ─── JSON Serialisation ──────────────────────────────────────────────
+
+function chatToJson(chat: ChatRow): Record<string, unknown> {
+  return {
+    chat_id: chat.chat_id,
+    display_name: chat.display_name,
+    chat_identifier: chat.chat_identifier,
+    service_name: chat.service_name,
+    message_count: chat.message_count,
+    last_message_date: chat.last_message_date
+      ? appleTimestampToDate(chat.last_message_date).toISOString()
+      : null,
+  };
+}
+
+function attachmentToJson(att: AttachmentInfo): Record<string, unknown> {
+  return {
+    filename: att.filename,
+    mime_type: att.mime_type,
+    resolved_path: att.resolved_path,
+    missing: att.missing,
+  };
+}
+
+function messageToJson(msg: MessageRow, includeAttachments: boolean): Record<string, unknown> {
+  const obj: Record<string, unknown> = {
+    rowid: msg.rowid,
+    guid: msg.guid,
+    date: appleTimestampToDate(msg.date).toISOString(),
+    is_from_me: !!msg.is_from_me,
+    handle: msg.handle,
+    chat: msg.display_name || msg.chat_identifier,
+    service: msg.service,
+    text: msg.text,
+  };
+  if (includeAttachments && msg.attachments.length > 0) {
+    obj.attachments = msg.attachments.map(attachmentToJson);
+  }
+  return obj;
+}
+
 // ─── Commands ────────────────────────────────────────────────────────
 
-function printMessages(messages: MessageRow[]) {
-  if (messages.length === 0) {
-    console.log("No messages found.");
+function cmdChats(db: Database, flags: Map<string, string>): void {
+  const limit = flagInt(flags, "--limit", 20);
+  const json = flags.has("--json");
+
+  const chats = listChats(db, limit);
+
+  if (json) {
+    console.log(JSON.stringify(chats.map(chatToJson), null, 2));
     return;
   }
-  for (const msg of [...messages].reverse()) {
-    console.log(formatMessage(msg));
-  }
-}
 
-function cmdRecent(db: Database, limit: number) {
-  console.log(`Last ${limit} messages:\n`);
-  const messages = getRecentMessages(db, limit);
-  printMessages(messages);
-}
-
-function cmdSearch(db: Database, term: string, limit: number) {
-  console.log(`Searching for "${term}" (limit ${limit}):\n`);
-  const messages = searchMessages(db, term, limit);
-  console.log(`Found ${messages.length} result(s).\n`);
-  printMessages(messages);
-}
-
-function cmdChats(db: Database) {
-  const chats = listChats(db);
   if (chats.length === 0) {
     console.log("No chats found.");
     return;
   }
-  console.log(`Found ${chats.length} chat(s):\n`);
   for (const chat of chats) {
-    const name = chat.display_name || chat.chat_identifier;
-    const lastDate = chat.last_message_date
-      ? appleTimestampToDate(chat.last_message_date).toLocaleString()
-      : "never";
-    console.log(
-      `  ${name}  [${chat.service_name}]  ${chat.message_count} messages  (last: ${lastDate})`
-    );
+    console.log(formatChatRow(chat));
   }
 }
 
-async function cmdSend(args: string[]) {
-  // Parse flags: --to <recipient> --text <message> [--file <path>] [--service imessage|sms] [--chat]
-  let recipient = "";
-  let text = "";
-  let file = "";
-  let service: "imessage" | "sms" = "imessage";
-  let isChat = false;
-
-  for (let i = 0; i < args.length; i++) {
-    switch (args[i]) {
-      case "--to":
-        recipient = args[++i] ?? "";
-        break;
-      case "--text":
-        text = args[++i] ?? "";
-        break;
-      case "--file":
-        file = args[++i] ?? "";
-        break;
-      case "--service":
-        service = (args[++i] ?? "imessage") as "imessage" | "sms";
-        break;
-      case "--chat":
-        isChat = true;
-        break;
-    }
+function printMessages(
+  messages: MessageRow[],
+  showAttachments: boolean,
+  json: boolean
+): void {
+  if (json) {
+    console.log(JSON.stringify(messages.map((m) => messageToJson(m, showAttachments)), null, 2));
+    return;
   }
 
+  if (messages.length === 0) {
+    console.log("No messages found.");
+    return;
+  }
+  for (const msg of messages) {
+    console.log(formatMessage(msg));
+    if (showAttachments && msg.attachments.length > 0) {
+      for (const att of msg.attachments) {
+        console.log(formatAttachmentLine(att));
+      }
+    }
+  }
+}
+
+function cmdHistory(db: Database, flags: Map<string, string>): void {
+  if (!flags.has("--chat-id")) {
+    console.error("Error: --chat-id is required for history.\n");
+    printUsage();
+    process.exit(1);
+  }
+
+  const chatId = flagInt(flags, "--chat-id", 0);
+  const limit = flagInt(flags, "--limit", 50);
+  const showAttachments = flags.has("--attachments");
+  const json = flags.has("--json");
+  const participants = flagList(flags, "--participants");
+  const start = flagDate(flags, "--start");
+  const end = flagDate(flags, "--end");
+
+  const messages = getChatMessages(db, { chatId, limit, participants, start, end });
+  // getChatMessages returns DESC; reverse for chronological display
+  printMessages([...messages].reverse(), showAttachments, json);
+}
+
+async function cmdWatch(db: Database, flags: Map<string, string>): Promise<void> {
+  const chatId = flags.has("--chat-id") ? flagInt(flags, "--chat-id", 0) : undefined;
+  const debounce = flagDebounce(flags, "--debounce", 250);
+  const showAttachments = flags.has("--attachments");
+  const json = flags.has("--json");
+  const participants = flagList(flags, "--participants");
+  const start = flagDate(flags, "--start");
+  const end = flagDate(flags, "--end");
+
+  let sinceRowid = flags.has("--since-rowid")
+    ? flagInt(flags, "--since-rowid", 0)
+    : getMaxRowid(db);
+
+  if (!json) {
+    console.log(`Watching for new messages (since rowid ${sinceRowid}, polling every ${debounce}ms)...`);
+  }
+
+  // eslint-disable-next-line no-constant-condition
+  while (true) {
+    const messages = pollNewMessages(db, sinceRowid, {
+      chatId,
+      participants,
+      start,
+      end,
+    });
+
+    if (messages.length > 0) {
+      if (json) {
+        // In JSON mode emit one JSON array per batch (newline-delimited)
+        console.log(JSON.stringify(messages.map((m) => messageToJson(m, showAttachments))));
+      } else {
+        for (const msg of messages) {
+          console.log(formatMessage(msg));
+          if (showAttachments && msg.attachments.length > 0) {
+            for (const att of msg.attachments) {
+              console.log(formatAttachmentLine(att));
+            }
+          }
+        }
+      }
+      // Advance cursor to the highest rowid we've seen
+      sinceRowid = messages[messages.length - 1]!.rowid;
+    }
+
+    await Bun.sleep(debounce);
+  }
+}
+
+async function cmdSend(flags: Map<string, string>): Promise<void> {
+  const recipient = flags.get("--to") ?? "";
+  const text = flags.get("--text") ?? "";
+  const file = flags.get("--file") ?? "";
+  const rawService = flags.get("--service") ?? "imessage";
+  const region = flags.get("--region");
+
   if (!recipient) {
-    console.error("Error: --to <recipient> is required.\n");
+    console.error("Error: --to <handle> is required.\n");
     printUsage();
     process.exit(1);
   }
@@ -109,13 +279,15 @@ async function cmdSend(args: string[]) {
     process.exit(1);
   }
 
+  const service = rawService as "imessage" | "sms" | "auto";
+
   try {
     await sendMessage({
       recipient,
       text: text || undefined,
       attachmentPath: file || undefined,
       service,
-      isChat,
+      region,
     });
     console.log(`Message sent to ${recipient}.`);
   } catch (err) {
@@ -124,53 +296,53 @@ async function cmdSend(args: string[]) {
   }
 }
 
-function printUsage() {
+function printUsage(): void {
   console.log(`Usage:
-  bun run index.ts recent [limit]           Show recent messages (default: 25)
-  bun run index.ts search <term> [limit]    Search messages by keyword (default limit: 50)
-  bun run index.ts chats                    List all chats with message counts
-  bun run index.ts send --to <recipient> --text <message> [--file <path>] [--service imessage|sms] [--chat]
-  bun run index.ts                          Same as 'recent 25'
+  imsg chats [--limit 20] [--json]
+  imsg history --chat-id <id> [--limit 50] [--attachments]
+               [--participants +15551234567,...] [--start <ISO>] [--end <ISO>] [--json]
+  imsg watch [--chat-id <id>] [--since-rowid <n>] [--debounce 250ms]
+             [--attachments] [--participants ...] [--start <ISO>] [--end <ISO>] [--json]
+  imsg send --to <handle> [--text "hi"] [--file /path/img.jpg]
+            [--service imessage|sms|auto] [--region US]
 
-Send options:
-  --to <recipient>       Phone number, email, or chat ID
-  --text <message>       Message text to send
-  --file <path>          Path to a file to attach
-  --service <service>    "imessage" (default) or "sms"
-  --chat                 Treat recipient as a chat ID (for group chats)
+Examples:
+  imsg chats --limit 5
+  imsg chats --limit 5 --json
+  imsg history --chat-id 1 --limit 10 --attachments
+  imsg history --chat-id 1 --start 2025-01-01T00:00:00Z --json
+  imsg watch --chat-id 1 --attachments --debounce 250ms
+  imsg send --to "+14155551212" --text "hi" --file ~/Desktop/pic.jpg --service imessage
 `);
 }
 
 // ─── Main ────────────────────────────────────────────────────────────
 
-const db = openDatabase();
-console.log(`iMessage database: ${DB_PATH}\n`);
-
 const [command, ...args] = process.argv.slice(2);
+const flags = parseFlags(args);
 
 switch (command) {
-  case "recent": {
-    const limit = parseInt(args[0] ?? "25") || 25;
-    cmdRecent(db, limit);
-    break;
-  }
-  case "search": {
-    if (!args[0]) {
-      console.error("Error: search requires a term.\n");
-      printUsage();
-      process.exit(1);
-    }
-    const term = args[0];
-    const limit = parseInt(args[1] ?? "50") || 50;
-    cmdSearch(db, term, limit);
-    break;
-  }
   case "chats": {
-    cmdChats(db);
+    const db = openDatabase();
+    cmdChats(db, flags);
+    db.close();
+    break;
+  }
+  case "history": {
+    const db = openDatabase();
+    cmdHistory(db, flags);
+    db.close();
+    break;
+  }
+  case "watch": {
+    const db = openDatabase();
+    await cmdWatch(db, flags);
+    // watch runs forever; db.close() is unreachable but placed for completeness
+    db.close();
     break;
   }
   case "send": {
-    await cmdSend(args);
+    await cmdSend(flags);
     break;
   }
   case "help":
@@ -180,9 +352,7 @@ switch (command) {
     break;
   }
   default: {
-    cmdRecent(db, 25);
+    printUsage();
     break;
   }
 }
-
-db.close();
