@@ -129,6 +129,99 @@ export function formatChatRow(chat: ChatRow): string {
 
 // ─── Queries ─────────────────────────────────────────────────────────
 
+/** Marker bytes in NSArchiver-encoded attributedBody preceding the plain text. */
+const ATTRIBUTED_BODY_TEXT_MARKER = Buffer.from([0x01, 0x2b]);
+
+/**
+ * Extract plain text from the NSArchiver-encoded attributedBody blob.
+ *
+ * The blob stores an NSAttributedString; the raw text lives after a
+ * `\x01\x2B` marker followed by a variable-length byte count:
+ *   - count < 0x80 → single byte length
+ *   - 0x81         → next 2 bytes (little-endian) are the byte length
+ *   - 0x82         → next 3 bytes (little-endian) are the byte length
+ *   - 0x83         → next 4 bytes (little-endian) are the byte length
+ */
+export function extractTextFromAttributedBody(blob: Uint8Array | null): string | null {
+  if (!blob || blob.length === 0) {
+    return null;
+  }
+
+  // Ensure we have a Buffer so we can use indexOf with a multi-byte needle.
+  const buf = Buffer.isBuffer(blob) ? blob : Buffer.from(blob);
+
+  const markerIndex = buf.indexOf(ATTRIBUTED_BODY_TEXT_MARKER);
+  if (markerIndex < 0) {
+    return null;
+  }
+
+  let offset = markerIndex + 2;
+  if (offset >= buf.length) {
+    return null;
+  }
+
+  const firstByte = buf[offset]!;
+  let byteLength: number;
+
+  if (firstByte < 0x80) {
+    byteLength = firstByte;
+    offset += 1;
+  } else {
+    // High bit set: the low 7 bits + 1 gives the number of following bytes
+    // that encode the length in little-endian order.
+    const lengthBytes = (firstByte & 0x7f) + 1;
+    offset += 1;
+    if (offset + lengthBytes > buf.length) {
+      return null;
+    }
+    byteLength = 0;
+    for (let i = 0; i < lengthBytes; i++) {
+      byteLength |= buf[offset + i]! << (8 * i);
+    }
+    offset += lengthBytes;
+  }
+
+  if (byteLength <= 0 || offset + byteLength > buf.length) {
+    return null;
+  }
+
+  const text = buf.subarray(offset, offset + byteLength).toString("utf-8");
+  return text.length > 0 ? text : null;
+}
+
+/**
+ * Fill in `text` from `attributedBody` for any message where `text` is null.
+ */
+function hydrateAttributedBodyText(messages: RawMessageRow[]): MessageRow[] {
+  return messages.map((msg) => {
+    const { attributed_body, ...rest } = msg;
+    const hydrated: MessageRow = { ...rest, attachments: [] };
+    if (hydrated.text === null && attributed_body) {
+      hydrated.text = extractTextFromAttributedBody(attributed_body);
+    }
+    return hydrated;
+  });
+}
+
+/**
+ * Raw row type returned by SQL queries that includes the attributedBody blob.
+ * This is converted to MessageRow after text hydration.
+ */
+interface RawMessageRow {
+  rowid: number;
+  guid: string;
+  text: string | null;
+  handle_id: number;
+  service: string;
+  date: number;
+  is_from_me: number;
+  cache_roomnames: string | null;
+  display_name: string | null;
+  chat_identifier: string | null;
+  handle: string | null;
+  attributed_body: Uint8Array | null;
+}
+
 const MESSAGE_SELECT = `
   SELECT
     m.rowid,
@@ -139,6 +232,7 @@ const MESSAGE_SELECT = `
     m.date,
     m.is_from_me,
     m.cache_roomnames,
+    m.attributedBody AS attributed_body,
     c.display_name,
     c.chat_identifier,
     h.id AS handle
@@ -206,25 +300,31 @@ function attachAttachments(db: Database, messages: MessageRow[]): MessageRow[] {
   return messages;
 }
 
-export function getRecentMessages(db: Database, limit: number): MessageRow[] {
-  const query = db.query<MessageRow, [number]>(`
-    ${MESSAGE_SELECT}
-    ORDER BY m.date DESC
-    LIMIT ?
-  `);
-  const messages = query.all(limit);
+/** Hydrate attributedBody text and attach attachments in one pass. */
+function processRawMessages(db: Database, rawMessages: RawMessageRow[]): MessageRow[] {
+  const messages = hydrateAttributedBodyText(rawMessages);
   return attachAttachments(db, messages);
 }
 
-export function searchMessages(db: Database, term: string, limit: number): MessageRow[] {
-  const query = db.query<MessageRow, [string, number]>(`
+export function getRecentMessages(db: Database, limit: number): MessageRow[] {
+  const query = db.query<RawMessageRow, [number]>(`
     ${MESSAGE_SELECT}
-    WHERE m.text LIKE ?
     ORDER BY m.date DESC
     LIMIT ?
   `);
-  const messages = query.all(`%${term}%`, limit);
-  return attachAttachments(db, messages);
+  const rawMessages = query.all(limit);
+  return processRawMessages(db, rawMessages);
+}
+
+export function searchMessages(db: Database, term: string, limit: number): MessageRow[] {
+  const query = db.query<RawMessageRow, [string, string, number]>(`
+    ${MESSAGE_SELECT}
+    WHERE (m.text LIKE ? OR m.attributedBody LIKE ?)
+    ORDER BY m.date DESC
+    LIMIT ?
+  `);
+  const rawMessages = query.all(`%${term}%`, `%${term}%`, limit);
+  return processRawMessages(db, rawMessages);
 }
 
 export function listChats(db: Database, limit?: number): ChatRow[] {
@@ -275,34 +375,24 @@ export function getChatMessages(db: Database, options: HistoryOptions): MessageR
   const where = conditions.join(" AND ");
 
   const sql = `
-    SELECT
-      m.rowid,
-      m.guid,
-      m.text,
-      m.handle_id,
-      m.service,
-      m.date,
-      m.is_from_me,
-      m.cache_roomnames,
-      c.display_name,
-      c.chat_identifier,
-      h.id AS handle
-    FROM message m
-    LEFT JOIN chat_message_join cmj ON cmj.message_id = m.rowid
-    LEFT JOIN chat c ON c.rowid = cmj.chat_id
-    LEFT JOIN handle h ON h.rowid = m.handle_id
+    ${MESSAGE_SELECT}
     WHERE ${where}
     ORDER BY m.date DESC
     LIMIT ?
   `;
 
   params.push(limit);
-  const query = db.query<MessageRow, (number | string)[]>(sql);
-  const messages = query.all(...params);
-  return attachAttachments(db, messages);
+  const query = db.query<RawMessageRow, (number | string)[]>(sql);
+  const rawMessages = query.all(...params);
+  return processRawMessages(db, rawMessages);
 }
 
-/** Poll for new messages with rowid > sinceRowid. Returns the new messages. */
+/**
+ * Poll for new messages with rowid > sinceRowid. Returns the new messages.
+ *
+ * Wraps queries in an explicit BEGIN/COMMIT so the WAL-mode readonly
+ * connection picks up writes made by iMessage since the last poll.
+ */
 export function pollNewMessages(
   db: Database,
   sinceRowid: number,
@@ -340,29 +430,23 @@ export function pollNewMessages(
   const where = conditions.join(" AND ");
 
   const sql = `
-    SELECT
-      m.rowid,
-      m.guid,
-      m.text,
-      m.handle_id,
-      m.service,
-      m.date,
-      m.is_from_me,
-      m.cache_roomnames,
-      c.display_name,
-      c.chat_identifier,
-      h.id AS handle
-    FROM message m
-    LEFT JOIN chat_message_join cmj ON cmj.message_id = m.rowid
-    LEFT JOIN chat c ON c.rowid = cmj.chat_id
-    LEFT JOIN handle h ON h.rowid = m.handle_id
+    ${MESSAGE_SELECT}
     WHERE ${where}
     ORDER BY m.rowid ASC
   `;
 
-  const query = db.query<MessageRow, (number | string)[]>(sql);
-  const messages = query.all(...params);
-  return attachAttachments(db, messages);
+  // BEGIN/COMMIT forces SQLite to release the old WAL read-mark and acquire
+  // a fresh one, ensuring we see rows written by other processes.
+  db.run("BEGIN");
+  try {
+    const query = db.query<RawMessageRow, (number | string)[]>(sql);
+    const rawMessages = query.all(...params);
+    db.run("COMMIT");
+    return processRawMessages(db, rawMessages);
+  } catch (err) {
+    db.run("ROLLBACK");
+    throw err;
+  }
 }
 
 /** Get the maximum message rowid in the database. */

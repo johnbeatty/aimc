@@ -12,6 +12,7 @@ import {
   getChatMessages,
   pollNewMessages,
   getMaxRowid,
+  extractTextFromAttributedBody,
   stageAttachment,
   buildSendAppleScript,
   type MessageRow,
@@ -49,7 +50,8 @@ function createTestDatabase(): Database {
       service TEXT NOT NULL,
       date INTEGER NOT NULL,
       is_from_me INTEGER NOT NULL DEFAULT 0,
-      cache_roomnames TEXT
+      cache_roomnames TEXT,
+      attributedBody BLOB
     );
 
     CREATE TABLE attachment (
@@ -778,5 +780,142 @@ describe("getMaxRowid", () => {
     const db = createTestDatabase();
     expect(getMaxRowid(db)).toBe(0);
     db.close();
+  });
+});
+
+// ─── extractTextFromAttributedBody ───────────────────────────────────
+
+/**
+ * Build a minimal NSArchiver-style attributedBody blob for testing.
+ * Format: preamble + \x01\x2B + length-encoded UTF-8 text + trailer.
+ */
+function buildAttributedBody(text: string): Buffer {
+  const preamble = Buffer.from(
+    "040B73747265616D747970656481E803840140848484124E534174747269627574656453747269" +
+    "6E67008484084E534F626A656374008592848484084E53537472696E67019484",
+    "hex"
+  );
+  const trailer = Buffer.from("8684026949", "hex");
+  const textBytes = Buffer.from(text, "utf-8");
+  const marker = Buffer.from([0x01, 0x2b]);
+
+  let lengthBytes: Buffer;
+  if (textBytes.length < 0x80) {
+    lengthBytes = Buffer.from([textBytes.length]);
+  } else {
+    // 0x81 + 2-byte little-endian length
+    const buf = Buffer.alloc(3);
+    buf[0] = 0x81;
+    buf.writeUInt16LE(textBytes.length, 1);
+    lengthBytes = buf;
+  }
+
+  return Buffer.concat([preamble, marker, lengthBytes, textBytes, trailer]);
+}
+
+describe("extractTextFromAttributedBody", () => {
+  test("extracts short text from attributedBody blob", () => {
+    const blob = buildAttributedBody("I love you!");
+    expect(extractTextFromAttributedBody(blob)).toBe("I love you!");
+  });
+
+  test("extracts text longer than 127 bytes", () => {
+    const longText = "A".repeat(200);
+    const blob = buildAttributedBody(longText);
+    expect(extractTextFromAttributedBody(blob)).toBe(longText);
+  });
+
+  test("returns null for null input", () => {
+    expect(extractTextFromAttributedBody(null)).toBeNull();
+  });
+
+  test("returns null for empty buffer", () => {
+    expect(extractTextFromAttributedBody(Buffer.alloc(0))).toBeNull();
+  });
+
+  test("returns null when marker is missing", () => {
+    const blob = Buffer.from("no marker here", "utf-8");
+    expect(extractTextFromAttributedBody(blob)).toBeNull();
+  });
+
+  test("handles multi-byte utf-8 characters", () => {
+    const text = "Hello 🤔 world";
+    const blob = buildAttributedBody(text);
+    expect(extractTextFromAttributedBody(blob)).toBe(text);
+  });
+});
+
+// ─── attributedBody hydration in queries ─────────────────────────────
+
+describe("attributedBody text hydration", () => {
+  let db: Database;
+
+  beforeEach(() => {
+    db = createTestDatabase();
+    seedBasicData(db);
+  });
+
+  afterEach(() => {
+    db.close();
+  });
+
+  test("fills in text from attributedBody when text is null", () => {
+    const blob = buildAttributedBody("Hidden message");
+    const t5 = dateToAppleTimestamp(new Date("2025-01-15T12:00:00Z"));
+    db.exec(`
+      INSERT INTO message (rowid, guid, text, handle_id, service, date, is_from_me, attributedBody)
+        VALUES (10, 'guid-ab-1', NULL, 1, 'iMessage', ${t5}, 0, X'${blob.toString("hex")}');
+      INSERT INTO chat_message_join (chat_id, message_id) VALUES (1, 10);
+    `);
+
+    const messages = getRecentMessages(db, 10);
+    const msg = messages.find((m) => m.guid === "guid-ab-1");
+    expect(msg).toBeDefined();
+    expect(msg!.text).toBe("Hidden message");
+  });
+
+  test("does not overwrite existing text with attributedBody", () => {
+    const blob = buildAttributedBody("Body text");
+    const t5 = dateToAppleTimestamp(new Date("2025-01-15T12:00:00Z"));
+    db.exec(`
+      INSERT INTO message (rowid, guid, text, handle_id, service, date, is_from_me, attributedBody)
+        VALUES (11, 'guid-ab-2', 'Original text', 1, 'iMessage', ${t5}, 0, X'${blob.toString("hex")}');
+      INSERT INTO chat_message_join (chat_id, message_id) VALUES (1, 11);
+    `);
+
+    const messages = getRecentMessages(db, 10);
+    const msg = messages.find((m) => m.guid === "guid-ab-2");
+    expect(msg).toBeDefined();
+    expect(msg!.text).toBe("Original text");
+  });
+
+  test("hydrates attributedBody in pollNewMessages results", () => {
+    const blob = buildAttributedBody("Polled hidden text");
+    const t5 = dateToAppleTimestamp(new Date("2025-01-15T12:00:00Z"));
+    db.exec(`
+      INSERT INTO message (rowid, guid, text, handle_id, service, date, is_from_me, attributedBody)
+        VALUES (12, 'guid-ab-3', NULL, 1, 'iMessage', ${t5}, 0, X'${blob.toString("hex")}');
+      INSERT INTO chat_message_join (chat_id, message_id) VALUES (1, 12);
+    `);
+
+    const messages = pollNewMessages(db, 4);
+    const msg = messages.find((m) => m.guid === "guid-ab-3");
+    expect(msg).toBeDefined();
+    expect(msg!.text).toBe("Polled hidden text");
+  });
+
+  test("hydrates attributedBody in getChatMessages results", () => {
+    const blob = buildAttributedBody("Chat hidden text");
+    const t5 = dateToAppleTimestamp(new Date("2025-01-15T12:00:00Z"));
+    db.exec(`
+      INSERT INTO message (rowid, guid, text, handle_id, service, date, is_from_me, attributedBody)
+        VALUES (13, 'guid-ab-4', NULL, 1, 'iMessage', ${t5}, 0, X'${blob.toString("hex")}');
+      INSERT INTO chat_message_join (chat_id, message_id) VALUES (1, 13);
+    `);
+
+    const messages = getChatMessages(db, { chatId: 1 });
+    const msg = messages.find((m) => m.guid === "guid-ab-4");
+    expect(msg).toBeDefined();
+    expect(msg!.text).toBe("Chat hidden text");
   });
 });
