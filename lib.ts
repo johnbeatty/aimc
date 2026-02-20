@@ -224,7 +224,7 @@ interface RawMessageRow {
 
 const MESSAGE_SELECT = `
   SELECT
-    m.rowid,
+    m.rowid AS rowid,
     m.guid,
     m.text,
     m.handle_id,

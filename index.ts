@@ -218,6 +218,7 @@ async function cmdWatch(db: Database, flags: Map<string, string>): Promise<void>
   const debounce = flagDebounce(flags, "--debounce", 250);
   const showAttachments = flags.has("--attachments");
   const json = flags.has("--json");
+  const debug = flags.has("--debug");
   const participants = flagList(flags, "--participants");
   const start = flagDate(flags, "--start");
   const end = flagDate(flags, "--end");
@@ -238,6 +239,14 @@ async function cmdWatch(db: Database, flags: Map<string, string>): Promise<void>
       start,
       end,
     });
+
+    if (debug) {
+      const maxRowid = getMaxRowid(db);
+      const lastRowid = messages.length > 0 ? messages[messages.length - 1]!.rowid : "-";
+      console.error(
+        `[debug] since=${sinceRowid} max=${maxRowid} batch=${messages.length} last=${lastRowid}`
+      );
+    }
 
     if (messages.length > 0) {
       if (json) {
@@ -302,7 +311,7 @@ function printUsage(): void {
   aimc history --chat-id <id> [--limit 50] [--attachments]
                [--participants +15551234567,...] [--start <ISO>] [--end <ISO>] [--json]
   aimc watch [--chat-id <id>] [--since-rowid <n>] [--debounce 250ms]
-             [--attachments] [--participants ...] [--start <ISO>] [--end <ISO>] [--json]
+             [--attachments] [--participants ...] [--start <ISO>] [--end <ISO>] [--json] [--debug]
   aimc send --to <handle> [--text "hi"] [--file /path/img.jpg]
             [--service imessage|sms|auto] [--region US]
 
