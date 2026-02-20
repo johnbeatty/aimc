@@ -1,4 +1,4 @@
-# imessage_client
+# Another iMessage Client
 
 A simple Bun CLI to read and send iMessages on macOS.
 
@@ -90,7 +90,7 @@ bun test
 
 **Reading:** The script reads `~/Library/Messages/chat.db` in **read-only** mode using Bun's built-in `bun:sqlite` driver. No external dependencies are required.
 
-**Sending:** Messages are sent via AppleScript using the Messages.app Scripting Dictionary (`tell application "Messages" to send ...`). Attachments are staged into `~/Library/Messages/Attachments/imsg/` before sending so Messages.app can access them.
+**Sending:** Messages are sent via AppleScript using the Messages.app Scripting Dictionary (`tell application "Messages" to send ...`). Attachments are staged into `~/Library/Messages/Attachments/aimc/` before sending so Messages.app can access them.
 
 It joins across the core iMessage tables:
 

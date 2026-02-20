@@ -513,7 +513,7 @@ describe("stageAttachment", () => {
   let tempFile: string;
 
   beforeEach(() => {
-    tempFile = join(tmpdir(), `imsg-test-${Date.now()}.txt`);
+    tempFile = join(tmpdir(), `aimc-test-${Date.now()}.txt`);
     writeFileSync(tempFile, "test attachment content");
   });
 
@@ -524,7 +524,7 @@ describe("stageAttachment", () => {
   test("copies file to staging directory", () => {
     const staged = stageAttachment(tempFile);
     expect(existsSync(staged)).toBe(true);
-    expect(staged).toContain("Library/Messages/Attachments/imsg/");
+    expect(staged).toContain("Library/Messages/Attachments/aimc/");
     expect(staged).toEndWith(`.txt`);
     // Clean up staged file
     rmSync(join(staged, ".."), { recursive: true });

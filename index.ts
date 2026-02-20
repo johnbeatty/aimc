@@ -298,21 +298,21 @@ async function cmdSend(flags: Map<string, string>): Promise<void> {
 
 function printUsage(): void {
   console.log(`Usage:
-  imsg chats [--limit 20] [--json]
-  imsg history --chat-id <id> [--limit 50] [--attachments]
+  aimc chats [--limit 20] [--json]
+  aimc history --chat-id <id> [--limit 50] [--attachments]
                [--participants +15551234567,...] [--start <ISO>] [--end <ISO>] [--json]
-  imsg watch [--chat-id <id>] [--since-rowid <n>] [--debounce 250ms]
+  aimc watch [--chat-id <id>] [--since-rowid <n>] [--debounce 250ms]
              [--attachments] [--participants ...] [--start <ISO>] [--end <ISO>] [--json]
-  imsg send --to <handle> [--text "hi"] [--file /path/img.jpg]
+  aimc send --to <handle> [--text "hi"] [--file /path/img.jpg]
             [--service imessage|sms|auto] [--region US]
 
 Examples:
-  imsg chats --limit 5
-  imsg chats --limit 5 --json
-  imsg history --chat-id 1 --limit 10 --attachments
-  imsg history --chat-id 1 --start 2025-01-01T00:00:00Z --json
-  imsg watch --chat-id 1 --attachments --debounce 250ms
-  imsg send --to "+14155551212" --text "hi" --file ~/Desktop/pic.jpg --service imessage
+  aimc chats --limit 5
+  aimc chats --limit 5 --json
+  aimc history --chat-id 1 --limit 10 --attachments
+  aimc history --chat-id 1 --start 2025-01-01T00:00:00Z --json
+  aimc watch --chat-id 1 --attachments --debounce 250ms
+  aimc send --to "+14155551212" --text "hi" --file ~/Desktop/pic.jpg --service imessage
 `);
 }
 

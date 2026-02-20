@@ -3,7 +3,7 @@
   "configVersion": 1,
   "workspaces": {
     "": {
-      "name": "imessage_client",
+      "name": "another_imessage_client",
       "devDependencies": {
         "@types/bun": "latest",
       },

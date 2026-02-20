@@ -391,7 +391,7 @@ export interface SendOptions {
 }
 
 /**
- * Stage an attachment into ~/Library/Messages/Attachments/imsg/<uuid>/
+ * Stage an attachment into ~/Library/Messages/Attachments/aimc/<uuid>/
  * so Messages.app can access it. Returns the staged file path.
  */
 export function stageAttachment(sourcePath: string): string {
@@ -405,7 +405,7 @@ export function stageAttachment(sourcePath: string): string {
     "Library",
     "Messages",
     "Attachments",
-    "imsg",
+    "aimc",
     randomUUID()
   );
   mkdirSync(stagingDir, { recursive: true });

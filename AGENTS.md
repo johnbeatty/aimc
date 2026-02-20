@@ -18,7 +18,7 @@ A macOS CLI tool for reading and sending iMessages. Built with **Bun** and **Typ
 
 ```bash
 bun install              # Install dependencies
-bun run build            # Compile to standalone binary: ./imessage-client
+bun run build            # Compile to standalone binary: ./aimc
 bun test                 # Run all tests
 bun test --only          # Run only tests marked with test.only(...)
 bun test --timeout 10000 # Override default test timeout (ms)

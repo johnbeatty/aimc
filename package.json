@@ -1,10 +1,10 @@
 {
-  "name": "imessage_client",
+  "name": "another_imessage_client",
   "module": "index.ts",
   "type": "module",
   "private": true,
   "scripts": {
-    "build": "bun build ./index.ts --compile --outfile imessage-client",
+    "build": "bun build ./index.ts --compile --outfile aimc",
     "test": "bun test"
   },
   "devDependencies": {
